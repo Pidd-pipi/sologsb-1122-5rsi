@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import type { TunnelFace } from '../../types/face';
-import type { RockGrade } from '../../types/grade';
+import type { GradeStatus, RockGrade } from '../../types/grade';
 import GradeTag from './GradeTag.vue';
 import { formatChainage } from '../../utils/geoMath';
 
 defineProps<{
   face: TunnelFace;
   grade?: RockGrade;
+  gradeStatus?: GradeStatus;
+  gradeReason?: string;
   jointCount?: number;
   waterCount?: number;
   footer?: string;
@@ -21,7 +23,9 @@ const emit = defineEmits<{
   <el-card class="face-card" shadow="hover" @click="emit('open', face.id)">
     <div class="row">
       <strong>{{ face.faceNo }}</strong>
-      <GradeTag :grade="grade" />
+      <GradeTag v-if="grade" :grade="grade" />
+      <el-tag v-else type="info" effect="plain">未判定/待重算</el-tag>
+      <el-tag v-if="gradeStatus === 'pending'" type="warning" size="small">待复核</el-tag>
       <el-tag size="small" effect="plain">{{ face.excavationMethod }}</el-tag>
     </div>
     <div class="line">
@@ -34,6 +38,7 @@ const emit = defineEmits<{
       {{ face.faceSize }} m
     </div>
     <div class="line">节理组 {{ jointCount ?? 0 }} 组 · 涌水记录 {{ waterCount ?? 0 }} 条 · 地质员 {{ face.geologist }}</div>
+    <div v-if="gradeStatus === 'pending' && gradeReason" class="line warn">⚠ {{ gradeReason }}</div>
     <div class="line muted">最近编录 {{ new Date(face.recordedAt).toLocaleString('zh-CN') }}</div>
     <div v-if="footer" class="line footer">{{ footer }}</div>
   </el-card>
@@ -57,6 +62,9 @@ const emit = defineEmits<{
 }
 .muted {
   color: #97a0ad;
+}
+.warn {
+  color: #b86e1b;
 }
 .footer {
   margin-top: 6px;

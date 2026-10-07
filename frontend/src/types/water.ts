@@ -25,9 +25,13 @@ export interface WaterInflow {
   measuredAt: number;
   /** 沿里程位置（米），用于趋势折线 */
   chainage: number;
+  /** 乐观锁版本号，每次保存 +1 */
+  rev: number;
+  /** 最近一次保存时间 */
+  updatedAt: number;
 }
 
-export type WaterInflowDraft = Omit<WaterInflow, 'id' | 'measuredAt'>;
+export type WaterInflowDraft = Omit<WaterInflow, 'id' | 'measuredAt' | 'rev' | 'updatedAt'>;
 
 /** 是否突变点（趋势突增或涌水量超过阈值） */
 export function isSurge(point: WaterInflow, all: WaterInflow[]): boolean {

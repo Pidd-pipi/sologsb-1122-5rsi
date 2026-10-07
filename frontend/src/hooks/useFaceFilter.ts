@@ -2,7 +2,7 @@ import { computed, ref } from 'vue';
 import { useFaceStore } from '../stores/faceStore';
 import { useGradeStore } from '../stores/gradeStore';
 import type { TunnelFace } from '../types/face';
-import type { RockGrade } from '../types/grade';
+import type { GradeStatus, RockGrade } from '../types/grade';
 
 export interface FaceFilters {
   chainageFrom: number;
@@ -16,6 +16,10 @@ export interface FaceFilters {
 export interface FaceRow {
   face: TunnelFace;
   grade?: RockGrade;
+  /** active 有效 / pending 待复核；已失效记录不产生级别 */
+  gradeStatus?: GradeStatus;
+  /** 待复核/失效原因 */
+  gradeReason?: string;
   lastRecordedAt: number;
 }
 
@@ -62,11 +66,17 @@ export function useFaceFilter(initial?: Partial<FaceFilters>) {
         }
         return true;
       })
-      .map((face) => ({
-        face,
-        grade: gradeStore.latestByFace(face.id)?.grade,
-        lastRecordedAt: face.recordedAt,
-      }));
+      .map((face) => {
+        // 台账只认真实有效的级别：已失效（未重算）的旧级别不返回
+        const latest = gradeStore.latestByFace(face.id);
+        return {
+          face,
+          grade: latest?.grade,
+          gradeStatus: latest?.status,
+          gradeReason: latest?.staleReason,
+          lastRecordedAt: face.recordedAt,
+        };
+      });
     rows.sort((a, b) => b.face.chainage - a.face.chainage);
     return rows;
   });

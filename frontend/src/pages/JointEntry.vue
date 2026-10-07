@@ -1,36 +1,46 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { useFaceStore } from '../stores/faceStore';
 import { useJointStore } from '../stores/jointStore';
+import { useGradeStore } from '../stores/gradeStore';
 import JointPolarPlot from '../components/common/JointPolarPlot.vue';
 import SketchCanvas from '../components/common/SketchCanvas.vue';
+import ConflictDialog from '../components/common/ConflictDialog.vue';
 import {
   FILL_MATERIALS,
   ROUGHNESSES,
   WATER_WETS,
   isDipAbnormal,
   type FillMaterial,
+  type JointSet,
   type JointSetDraft,
   type Roughness,
   type WaterWet,
 } from '../types/joint';
 import { attitudeText, clusterJoints } from '../utils/geoMath';
 import { nextSetNo } from '../utils/id';
+import { isConflictError, type ConflictInfo } from '../utils/concurrency';
+import { useRemoteSync } from '../hooks/useRemoteSync';
 
 const route = useRoute();
 const router = useRouter();
 const faceStore = useFaceStore();
 const jointStore = useJointStore();
+const gradeStore = useGradeStore();
 
 const faceId = computed(() => String(route.params.id ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
 const joints = computed(() => jointStore.byFace(faceId.value));
 const clusters = computed(() => clusterJoints(joints.value));
+const pendingGrade = computed(() => {
+  const latest = gradeStore.activeByFace(faceId.value)[0];
+  return latest?.status === 'pending' ? latest : undefined;
+});
 
 const error = ref('');
-const mergeTarget = ref('');
+const conflict = ref<ConflictInfo | null>(null);
 
 const form = reactive<JointSetDraft>({
   faceId: '',
@@ -46,6 +56,11 @@ const form = reactive<JointSetDraft>({
   jointCount: 5,
 });
 
+// 编辑对话框状态
+const editVisible = ref(false);
+const editForm = reactive<JointSetDraft>({ ...form });
+const editing = ref<JointSet | null>(null);
+
 watch(
   faceId,
   (id) => {
@@ -60,6 +75,7 @@ watch(
 );
 
 const dipAbnormal = computed(() => isDipAbnormal(form.dipAngle));
+const editDipAbnormal = computed(() => isDipAbnormal(editForm.dipAngle));
 const apparentDipHint = computed(() => {
   // 视倾角示意：假定剖面方向与倾向夹角 30°
   const rad = (v: number) => (v * Math.PI) / 180;
@@ -82,8 +98,8 @@ async function submit() {
     return;
   }
   const created = await jointStore.add({ ...form });
-  ElMessage.success(`已录入 J${created.setNo}：${attitudeText(created.dipDirection, created.dipAngle)}`);
-  form.setNo = nextSetNo(joints.value.map((j) => j.setNo));
+  ElMessage.success(`已录入 J${created.setNo}：${attitudeText(created.dipDirection, created.dipAngle)}，旧级别已失效并按新数据重算`);
+  form.setNo = nextSetNo(jointStore.byFace(faceId.value).map((j) => j.setNo));
   form.jointCount = 5;
 }
 
@@ -97,13 +113,99 @@ async function mergeCluster(clusterNo: number) {
   const sourceIds = joints.value.filter((j) => cluster.members.includes(`J${j.setNo}`) && j.id !== target?.id).map((j) => j.id);
   if (!target) return;
   await jointStore.mergeInto(target.id, sourceIds);
-  ElMessage.success(`已把 ${cluster.members.slice(1).join('、')} 合并入 J${target.setNo}`);
+  ElMessage.success(`已把 ${cluster.members.slice(1).join('、')} 合并入 J${target.setNo}，旧级别已重算`);
+}
+
+function openEdit(row: JointSet) {
+  editing.value = JSON.parse(JSON.stringify(row)) as JointSet;
+  Object.assign(editForm, {
+    faceId: row.faceId,
+    setNo: row.setNo,
+    dipDirection: row.dipDirection,
+    dipAngle: row.dipAngle,
+    spacing: row.spacing,
+    persistence: row.persistence,
+    aperture: row.aperture,
+    fillMaterial: row.fillMaterial,
+    roughness: row.roughness,
+    waterWet: row.waterWet,
+    jointCount: row.jointCount,
+  });
+  editVisible.value = true;
+}
+
+async function saveEdit() {
+  if (!editing.value) return;
+  if (isDipAbnormal(editForm.dipAngle)) {
+    ElMessage.error('倾角异常：必须落在 0 ~ 90° 之间');
+    return;
+  }
+  const duplicate = joints.value.find(
+    (j) => j.setNo === editForm.setNo && j.id !== editing.value?.id,
+  );
+  if (duplicate) {
+    ElMessage.error(`组号 J${editForm.setNo} 已被其他节理组占用`);
+    return;
+  }
+  try {
+    await jointStore.update(
+      editing.value.id,
+      { ...editForm },
+      editing.value,
+    );
+    ElMessage.success('节理组已保存，旧级别已失效并按新数据重算');
+    editVisible.value = false;
+  } catch (e) {
+    if (isConflictError(e)) conflict.value = e.info;
+    else ElMessage.error(e instanceof Error ? e.message : '保存失败');
+  }
+}
+
+async function removeRow(row: JointSet) {
+  try {
+    await ElMessageBox.confirm(`确认删除 J${row.setNo}？删除后该掌子面旧级别将立即失效并重算。`, '删除确认', {
+      type: 'warning',
+    });
+  } catch {
+    return;
+  }
+  try {
+    await jointStore.remove(row.id, row);
+    ElMessage.success(`已删除 J${row.setNo}，旧级别已重算`);
+  } catch (e) {
+    if (isConflictError(e)) {
+      conflict.value = e.info;
+    } else {
+      ElMessage.error(e instanceof Error ? e.message : '删除失败');
+    }
+  }
+}
+
+async function reloadConflict() {
+  if (!conflict.value) return;
+  await jointStore.load();
+  const fresh = jointStore.items.find((j) => j.id === conflict.value?.id);
+  const wasEditing = editing.value;
+  conflict.value = null;
+  if (fresh && editVisible.value && wasEditing) {
+    editing.value = JSON.parse(JSON.stringify(fresh)) as JointSet;
+    openEdit(fresh);
+    ElMessage.warning('已载入对方刚保存的节理组，请在此基础上核对');
+  } else if (!fresh) {
+    editVisible.value = false;
+    ElMessage.info('该节理组已被对方删除');
+  } else {
+    ElMessage.warning('列表已刷新为对方最新数据');
+  }
 }
 
 onMounted(async () => {
   await faceStore.load();
   await jointStore.load();
+  await gradeStore.load();
 });
+
+useRemoteSync();
 </script>
 
 <template>
@@ -111,10 +213,23 @@ onMounted(async () => {
     <div class="header">
       <h2>节理产状录入 · {{ face?.faceNo ?? '未知' }}</h2>
       <el-tag type="info" effect="plain">已录 {{ joints.length }} 组</el-tag>
+      <el-tag v-if="pendingGrade" type="warning">围岩级别待复核：{{ pendingGrade.grade }} 级</el-tag>
       <div class="spacer" />
       <el-button @click="router.push(`/faces/${faceId}`)">返回掌子面详情</el-button>
       <el-button @click="router.push(`/grade/${faceId}`)">围岩级别判定</el-button>
     </div>
+
+    <el-alert
+      v-if="pendingGrade"
+      type="warning"
+      :closable="false"
+      show-icon
+      :title="`节理改动后系统已按新数据重算为 ${pendingGrade.grade} 级（待复核），旧级别不再计入台账`"
+    >
+      <div style="margin-top: 6px">
+        <el-button size="small" type="primary" @click="router.push(`/grade/${faceId}`)">前往复核</el-button>
+      </div>
+    </el-alert>
 
     <div class="grid">
       <el-card shadow="never">
@@ -216,9 +331,10 @@ onMounted(async () => {
             <el-table-column prop="roughness" label="粗糙度" width="110" />
             <el-table-column prop="waterWet" label="渗水" width="90" />
             <el-table-column prop="jointCount" label="条数" width="80" />
-            <el-table-column label="操作" width="90">
+            <el-table-column label="操作" width="130">
               <template #default="{ row }">
-                <el-button size="small" danger @click="jointStore.remove(row.id)">删除</el-button>
+                <el-button size="small" @click="openEdit(row)">编辑</el-button>
+                <el-button size="small" danger @click="removeRow(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -230,6 +346,59 @@ onMounted(async () => {
         </el-card>
       </div>
     </div>
+
+    <el-dialog v-model="editVisible" title="编辑节理组" width="480px" :close-on-click-modal="false">
+      <el-form :model="editForm" label-width="100px">
+        <el-form-item label="组号">
+          <el-input-number v-model="editForm.setNo" :min="1" :max="99" />
+        </el-form-item>
+        <el-form-item label="倾向 °">
+          <el-input-number v-model="editForm.dipDirection" :min="0" :max="360" />
+        </el-form-item>
+        <el-form-item label="倾角 °">
+          <el-input-number v-model="editForm.dipAngle" :min="0" :max="120" />
+          <span v-if="editDipAbnormal" class="warn">倾角异常</span>
+        </el-form-item>
+        <el-form-item label="间距 cm">
+          <el-input-number v-model="editForm.spacing" :min="1" :max="500" />
+        </el-form-item>
+        <el-form-item label="延伸长度 m">
+          <el-input-number v-model="editForm.persistence" :min="0" :max="50" :step="0.1" :precision="1" />
+        </el-form-item>
+        <el-form-item label="张开度 mm">
+          <el-input-number v-model="editForm.aperture" :min="0" :max="100" :step="0.1" :precision="1" />
+        </el-form-item>
+        <el-form-item label="充填物">
+          <el-select v-model="editForm.fillMaterial">
+            <el-option v-for="f in FILL_MATERIALS" :key="f" :label="f" :value="f" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="粗糙度">
+          <el-select v-model="editForm.roughness">
+            <el-option v-for="r in ROUGHNESSES" :key="r" :label="r" :value="r" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="渗水状态">
+          <el-select v-model="editForm.waterWet">
+            <el-option v-for="w in WATER_WETS" :key="w" :label="w" :value="w" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="条数">
+          <el-input-number v-model="editForm.jointCount" :min="1" :max="999" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveEdit">保存修改</el-button>
+      </template>
+    </el-dialog>
+
+    <ConflictDialog
+      :conflict="conflict"
+      :entity-label="editing ? `节理组 J${editing.setNo}` : '节理组'"
+      @reload="reloadConflict"
+      @close="conflict = null"
+    />
   </div>
 </template>
 

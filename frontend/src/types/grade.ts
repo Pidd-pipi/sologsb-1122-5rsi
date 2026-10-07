@@ -8,6 +8,20 @@ export type Groundwater = '干燥' | '潮湿' | '点滴状出水' | '线状出�
 
 export const GROUNDWATERS: Groundwater[] = ['干燥', '潮湿', '点滴状出水', '线状出水', '涌流状出水'];
 
+/**
+ * 判定状态：
+ * - active  有效（编录未变，级别仍可入账）
+ * - pending 待复核：按新编录自动重算但尚未经地质员确认；计入台账但显著标注
+ * - stale   已失效：编录已改动且尚未重算，旧级别与支护建议一律不计入台账
+ */
+export type GradeStatus = 'active' | 'pending' | 'stale';
+
+export const GRADE_STATUS_LABEL: Record<GradeStatus, string> = {
+  active: '有效',
+  pending: '待复核',
+  stale: '已失效',
+};
+
 /** 围岩级别判定记录 */
 export interface RockMassGrade {
   id: string;
@@ -28,14 +42,74 @@ export interface RockMassGrade {
   correction: number;
   /** 修正后的 [BQ] */
   correctedBq: number;
+  /** 其它修正系数（人工在判定页填写的 K3） */
+  extraCorrection: number;
   /** 支护建议 */
   supportSuggestion: string;
   /** 是否人工修正级别 */
   manualAdjusted: boolean;
   judgedAt: number;
+  /** 判定时依据的节理/涌水/掌子面摘要 */
+  basis: GradeBasisSnapshot;
+  /** 判定时编录数据指纹；指纹变化即说明依据已变 */
+  basisFingerprint: string;
+  status: GradeStatus;
+  /** 失效原因（status=stale 时填写，如「节理组改动」「涌水记录改动」） */
+  staleReason?: string;
+  /** 待复核/已失效判定由哪条有效判定重算而来 */
+  recalculatedFromId?: string;
+  /** 乐观锁版本号，每次保存 +1 */
+  rev: number;
+  /** 最近一次保存时间 */
+  updatedAt: number;
 }
 
-export type RockMassGradeDraft = Omit<RockMassGrade, 'id' | 'judgedAt'>;
+export type RockMassGradeDraft = Omit<
+  RockMassGrade,
+  'id' | 'judgedAt' | 'rev' | 'updatedAt'
+>;
+
+/** 判定所依据的编录数据快照（摘要 + 指纹源） */
+export interface GradeBasisSnapshot {
+  /** 掌子面关键参数摘要 */
+  faceSummary: string;
+  /** 节理组摘要，如「J1 128°∠72° 间距42cm 9条；…」 */
+  jointSummary: string;
+  /** 涌水摘要，如「最新 拱脚左侧 股状 68 L/min（突增）；共 3 条」 */
+  waterSummary: string;
+  /** 指纹用的结构化源数据（不展示，用于比对） */
+  source: GradeBasisSource;
+}
+
+/** 参与指纹计算的编录源数据：掌子面/节理/涌水任一变化都会改变指纹 */
+export interface GradeBasisSource {
+  face: {
+    rockStrength: number;
+    faceSize: string;
+    lithology: string;
+    weathering: string;
+    attitude: { strike: number; dipDirection: number; dipAngle: number };
+  };
+  joints: Array<{
+    setNo: number;
+    dipDirection: number;
+    dipAngle: number;
+    spacing: number;
+    persistence: number;
+    aperture: number;
+    fillMaterial: string;
+    roughness: string;
+    waterWet: string;
+    jointCount: number;
+  }>;
+  waters: Array<{
+    position: string;
+    type: string;
+    estimatedFlow: number;
+    changeTrend: string;
+    chainage: number;
+  }>;
+}
 
 /** 级别色带（用于 <GradeTag>） */
 export const GRADE_COLOR: Record<RockGrade, string> = {

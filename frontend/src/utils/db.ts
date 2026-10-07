@@ -4,9 +4,11 @@ import type { JointSet } from '../types/joint';
 import type { RockMassGrade } from '../types/grade';
 import type { WaterInflow } from '../types/water';
 import { newId } from './id';
+import { buildBasis, fingerprintOf, recalcGrade } from './gradeBasis';
+import { GRADE_SUPPORT } from '../types/grade';
 
 export const DB_NAME = 'gbtunnelface';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbtunnelface:db-version';
 
 class TunnelFaceDB extends Dexie {
@@ -50,6 +52,81 @@ class TunnelFaceDB extends Dexie {
           .toCollection()
           .modify((row: any) => {
             if (row.chainage === undefined) row.chainage = 0;
+          });
+      });
+    this.version(3)
+      .stores({
+        faces: 'id, faceNo, chainage, lithology, excavationMethod, weathering, recordedAt',
+        joints: 'id, faceId, setNo, dipDirection, dipAngle, fillMaterial',
+        grades: 'id, faceId, grade, judgedAt, bqValue, status',
+        waters: 'id, faceId, chainage, type, changeTrend',
+      })
+      .upgrade(async (tx) => {
+        // 乐观锁字段：所有表补 rev / updatedAt
+        await tx
+          .table('faces')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.rev === undefined) row.rev = 1;
+            if (row.updatedAt === undefined) row.updatedAt = row.recordedAt ?? Date.now();
+          });
+        await tx
+          .table('joints')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.rev === undefined) row.rev = 1;
+            if (row.updatedAt === undefined) row.updatedAt = Date.now();
+          });
+        await tx
+          .table('waters')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.rev === undefined) row.rev = 1;
+            if (row.updatedAt === undefined) row.updatedAt = row.measuredAt ?? Date.now();
+          });
+
+        // 老判定：无依据摘要的，按当前掌子面/节理/涌水数据补一份，并标待复核
+        const faces = await tx.table<TunnelFace, string>('faces').toArray();
+        const joints = await tx.table<JointSet, string>('joints').toArray();
+        const waters = await tx.table<WaterInflow, string>('waters').toArray();
+        await tx
+          .table<RockMassGrade, string>('grades')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.rev === undefined) row.rev = 1;
+            if (row.updatedAt === undefined) row.updatedAt = row.judgedAt ?? Date.now();
+            if (row.extraCorrection === undefined) row.extraCorrection = 0;
+
+            const face = faces.find((f) => f.id === row.faceId);
+            if (face) {
+              const faceJoints = joints.filter((j) => j.faceId === face.id);
+              const faceWaters = waters.filter((w) => w.faceId === face.id);
+              if (!row.basis || !row.basisFingerprint) {
+                const recalced = recalcGrade({
+                  face,
+                  joints: faceJoints,
+                  waters: faceWaters,
+                  previous: row,
+                });
+                row.basis = recalced.basis;
+                row.basisFingerprint = recalced.basisFingerprint;
+                // 级别与指标按现有数据补算，支护建议同步，提示地质员复核
+                row.grade = recalced.grade;
+                row.bqValue = recalced.bqValue;
+                row.correctedBq = recalced.correctedBq;
+                row.correction = recalced.correction;
+                row.jv = recalced.jv;
+                row.groundwater = recalced.groundwater;
+                row.spanWidth = recalced.spanWidth;
+                row.supportSuggestion = GRADE_SUPPORT[recalced.grade];
+                row.status = 'pending';
+                row.staleReason = '历史数据补录：按现有节理/涌水数据补算，请复核';
+              } else {
+                row.status = row.status ?? 'active';
+              }
+            } else {
+              row.status = row.status ?? 'active';
+            }
           });
       });
   }
@@ -108,6 +185,8 @@ export async function ensureSeedData(): Promise<void> {
       attitude: { strike: 42, dipDirection: 132, dipAngle: 34 },
       recordedAt: now - 2 * day,
       geologist: '岑柏川',
+      rev: 1,
+      updatedAt: now - 2 * day,
     },
     {
       id: face2,
@@ -122,6 +201,8 @@ export async function ensureSeedData(): Promise<void> {
       attitude: { strike: 48, dipDirection: 138, dipAngle: 28 },
       recordedAt: now - 6 * hour,
       geologist: '岑柏川',
+      rev: 1,
+      updatedAt: now - 6 * hour,
     },
   ];
 
@@ -139,6 +220,8 @@ export async function ensureSeedData(): Promise<void> {
       roughness: '粗糙',
       waterWet: '潮湿',
       jointCount: 9,
+      rev: 1,
+      updatedAt: now - 2 * day,
     },
     {
       id: newId('joint'),
@@ -153,6 +236,8 @@ export async function ensureSeedData(): Promise<void> {
       roughness: '平整',
       waterWet: '滴水',
       jointCount: 5,
+      rev: 1,
+      updatedAt: now - 2 * day,
     },
     {
       id: newId('joint'),
@@ -167,6 +252,8 @@ export async function ensureSeedData(): Promise<void> {
       roughness: '起伏粗糙',
       waterWet: '干燥',
       jointCount: 12,
+      rev: 1,
+      updatedAt: now - 2 * day,
     },
     {
       id: newId('joint'),
@@ -181,25 +268,8 @@ export async function ensureSeedData(): Promise<void> {
       roughness: '平直光滑',
       waterWet: '线流',
       jointCount: 4,
-    },
-  ];
-
-  const grades: RockMassGrade[] = [
-    {
-      id: newId('grade'),
-      faceId: face1,
-      grade: 'Ⅲ',
-      bqValue: 358,
-      rqd: 78,
-      jv: 6.2,
-      kv: 0.61,
-      groundwater: '点滴状出水',
-      spanWidth: 12.6,
-      correction: 0.1,
-      correctedBq: 348,
-      supportSuggestion: '系统锚杆（φ25，L=3.0 m，间距 1.0 m）+ 喷射混凝土 12 cm + 钢筋网',
-      manualAdjusted: false,
-      judgedAt: now - 2 * day,
+      rev: 1,
+      updatedAt: now - 6 * hour,
     },
   ];
 
@@ -215,6 +285,8 @@ export async function ensureSeedData(): Promise<void> {
       changeTrend: '稳定',
       measuredAt: now - 2 * day,
       chainage: 12478,
+      rev: 1,
+      updatedAt: now - 2 * day,
     },
     {
       id: newId('water'),
@@ -227,6 +299,8 @@ export async function ensureSeedData(): Promise<void> {
       changeTrend: '增大',
       measuredAt: now - day,
       chainage: 12481,
+      rev: 1,
+      updatedAt: now - day,
     },
     {
       id: newId('water'),
@@ -239,6 +313,39 @@ export async function ensureSeedData(): Promise<void> {
       changeTrend: '突增',
       measuredAt: now - 4 * hour,
       chainage: 12484,
+      rev: 1,
+      updatedAt: now - 4 * hour,
+    },
+  ];
+
+  // 示范判定按当前掌子面/节理/涌水生成依据摘要，保证级别随编录可校验
+  const face1Joints = joints.filter((j) => j.faceId === face1);
+  const face1Waters = waters.filter((w) => w.faceId === face1);
+  const basis = buildBasis(faces[0], face1Joints, face1Waters);
+  const grades: RockMassGrade[] = [
+    {
+      id: newId('grade'),
+      faceId: face1,
+      grade: 'Ⅳ',
+      bqValue: 428.5,
+      rqd: 78,
+      jv: 2.6,
+      kv: 0.61,
+      groundwater: '涌流状出水',
+      spanWidth: 12.6,
+      correction: 0.34,
+      correctedBq: 394.5,
+      extraCorrection: 0,
+      supportSuggestion: GRADE_SUPPORT['Ⅳ'],
+      manualAdjusted: false,
+      judgedAt: now - 4 * hour,
+      basis,
+      basisFingerprint: fingerprintOf(basis.source),
+      status: 'pending',
+      staleReason: '示范数据：按最新涌水（股状 68 L/min）自动重算，请复核',
+      recalculatedFromId: undefined,
+      rev: 1,
+      updatedAt: now - 4 * hour,
     },
   ];
 
