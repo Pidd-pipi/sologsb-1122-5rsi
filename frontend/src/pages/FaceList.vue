@@ -167,6 +167,7 @@ onMounted(async () => {
         :key="row.face.id"
         :face="row.face"
         :grade="row.grade"
+        :needs-review="row.needsReview"
         :joint-count="jointStore.byFace(row.face.id).length"
         :water-count="gradeStore.watersByFace(row.face.id).length"
         :footer="`编录时间 ${new Date(row.lastRecordedAt).toLocaleString('zh-CN')}`"

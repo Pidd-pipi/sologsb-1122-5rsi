@@ -32,6 +32,14 @@ export interface RockMassGrade {
   supportSuggestion: string;
   /** 是否人工修正级别 */
   manualAdjusted: boolean;
+  /** 判定依据指纹：由掌子面关键参数 + 节理组 + 涌水记录算出，任一改动即失配 */
+  basisHash: string;
+  /** 判定依据的节理涌水摘要（人读） */
+  basisSummary: string;
+  /** 老库补录或人工修正被数据变更冲掉的判定，需人工复核后才算定论 */
+  needsReview: boolean;
+  /** 由哪条已失效判定自动重算而来 */
+  recalculatedFrom?: string;
   judgedAt: number;
 }
 

@@ -16,6 +16,8 @@ export interface FaceFilters {
 export interface FaceRow {
   face: TunnelFace;
   grade?: RockGrade;
+  /** 当前有效判定是否待复核 */
+  needsReview?: boolean;
   lastRecordedAt: number;
 }
 
@@ -51,7 +53,8 @@ export function useFaceFilter(initial?: Partial<FaceFilters>) {
         if (face.chainage < f.chainageFrom || face.chainage > f.chainageTo) return false;
         if (f.lithology !== 'all' && face.lithology !== f.lithology) return false;
         if (f.method !== 'all' && face.excavationMethod !== f.method) return false;
-        const grade = gradeStore.latestByFace(face.id)?.grade;
+        // 台账只认与现编录数据一致的有效判定；失效未重算的不计入
+        const grade = gradeStore.currentByFace(face.id)?.grade;
         if (f.grade !== 'all' && grade !== f.grade) return false;
         if (kw) {
           const hit =
@@ -62,11 +65,15 @@ export function useFaceFilter(initial?: Partial<FaceFilters>) {
         }
         return true;
       })
-      .map((face) => ({
-        face,
-        grade: gradeStore.latestByFace(face.id)?.grade,
-        lastRecordedAt: face.recordedAt,
-      }));
+      .map((face) => {
+        const current = gradeStore.currentByFace(face.id);
+        return {
+          face,
+          grade: current?.grade,
+          needsReview: current?.needsReview,
+          lastRecordedAt: face.recordedAt,
+        };
+      });
     rows.sort((a, b) => b.face.chainage - a.face.chainage);
     return rows;
   });

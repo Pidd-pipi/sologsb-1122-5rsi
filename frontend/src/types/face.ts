@@ -39,6 +39,10 @@ export interface TunnelFace {
   attitude: Attitude;
   recordedAt: number;
   geologist: string;
+  /** 乐观并发版本号：每次成功写入 +1，用于多人同时保存时的冲突检测 */
+  rev: number;
+  /** 最近一次字段级合并写入时间 */
+  updatedAt: number;
 }
 
-export type TunnelFaceDraft = Omit<TunnelFace, 'id' | 'recordedAt'>;
+export type TunnelFaceDraft = Omit<TunnelFace, 'id' | 'recordedAt' | 'rev' | 'updatedAt'>;

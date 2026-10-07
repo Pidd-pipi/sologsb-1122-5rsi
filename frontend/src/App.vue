@@ -1,7 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onMounted, onUnmounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { readDbVersion } from './utils/db';
+import { onCrossTabDataChanged } from './utils/crossTab';
+import { useFaceStore } from './stores/faceStore';
+import { useJointStore } from './stores/jointStore';
+import { useGradeStore } from './stores/gradeStore';
 
 const route = useRoute();
 const router = useRouter();
@@ -26,6 +30,15 @@ function onSelect(index: string) {
   }
   void router.push(index);
 }
+
+// 其它标签页写入本地库后，本页重新加载，避免基于旧数据继续编录
+let offCrossTab: (() => void) | undefined;
+onMounted(() => {
+  offCrossTab = onCrossTabDataChanged(() => {
+    void Promise.all([useFaceStore().load(), useJointStore().load(), useGradeStore().load()]);
+  });
+});
+onUnmounted(() => offCrossTab?.());
 </script>
 
 <template>

@@ -7,8 +7,9 @@ import { useGradeStore } from '../stores/gradeStore';
 import { useJointStore } from '../stores/jointStore';
 import { useGradeCalc } from '../hooks/useGradeCalc';
 import GradeTag from '../components/common/GradeTag.vue';
-import { GROUNDWATERS, GRADE_SUPPORT, ROCK_GRADES, type Groundwater, type RockGrade } from '../types/grade';
+import { GROUNDWATERS, GRADE_SUPPORT, ROCK_GRADES, type RockGrade, type RockMassGrade } from '../types/grade';
 import { attitudeText, estimateJv, formatChainage } from '../utils/geoMath';
+import { computeGradeBasis } from '../utils/gradeBasis';
 
 const route = useRoute();
 const router = useRouter();
@@ -19,8 +20,19 @@ const jointStore = useJointStore();
 const faceId = computed(() => String(route.params.faceId ?? ''));
 const face = computed(() => faceStore.byId(faceId.value));
 const joints = computed(() => jointStore.byFace(faceId.value));
+const waters = computed(() => gradeStore.watersByFace(faceId.value));
 const history = computed(() => gradeStore.byFace(faceId.value));
 const previous = computed(() => history.value[0]);
+const current = computed(() => gradeStore.currentByFace(faceId.value));
+
+/** 现编录数据的依据指纹：与判定记录比对得出有效/已失效 */
+const currentHash = computed(() =>
+  face.value ? computeGradeBasis(face.value, joints.value, waters.value).hash : '',
+);
+
+function isValid(row: RockMassGrade): boolean {
+  return row.basisHash === currentHash.value;
+}
 
 const { input, result, patch } = useGradeCalc(() => joints.value);
 const manual = ref(false);
@@ -52,6 +64,8 @@ async function save() {
     ElMessage.error('未找到该掌子面');
     return;
   }
+  // 判定时记下依据的节理涌水摘要与指纹，之后编录数据一改即失效
+  const basis = computeGradeBasis(face.value, joints.value, waters.value);
   await gradeStore.addGrade({
     faceId: face.value.id,
     grade: finalGrade.value,
@@ -65,8 +79,16 @@ async function save() {
     correctedBq: result.value.correctedBq,
     supportSuggestion: finalSupport.value,
     manualAdjusted: manual.value,
+    basisHash: basis.hash,
+    basisSummary: basis.summary,
+    needsReview: false,
   });
   ElMessage.success(`已保存 ${finalGrade.value} 级围岩判定`);
+}
+
+async function confirmReview(row: RockMassGrade) {
+  await gradeStore.confirmReview(row.id);
+  ElMessage.success(`已复核确认 ${row.grade} 级判定`);
 }
 
 onMounted(async () => {
@@ -94,6 +116,14 @@ onMounted(async () => {
     </div>
 
     <el-alert v-if="!face" type="warning" :closable="false" show-icon title="未找到该掌子面" />
+    <el-alert
+      v-if="current?.needsReview"
+      type="warning"
+      :closable="false"
+      show-icon
+      title="当前级别判定为老数据补录或自动重算结果，待人工复核"
+      description="请在下方核对指标后重新保存判定，或在历史判定中点击「复核确认」。"
+    />
 
     <div class="grid">
       <el-card shadow="never">
@@ -158,19 +188,41 @@ onMounted(async () => {
         <el-card shadow="never">
           <template #header><strong>本掌子面历史判定</strong></template>
           <el-table :data="history" size="small" border>
-            <el-table-column label="时间" width="170">
+            <el-table-column label="时间" width="160">
               <template #default="{ row }">{{ new Date(row.judgedAt).toLocaleString('zh-CN') }}</template>
             </el-table-column>
-            <el-table-column label="级别" width="90">
+            <el-table-column label="级别" width="80">
               <template #default="{ row }"><GradeTag :grade="row.grade" /></template>
             </el-table-column>
-            <el-table-column prop="bqValue" label="BQ" width="90" />
-            <el-table-column prop="correctedBq" label="[BQ]" width="90" />
-            <el-table-column prop="rqd" label="RQD" width="80" />
-            <el-table-column prop="kv" label="Kv" width="80" />
-            <el-table-column prop="groundwater" label="出水" width="120" />
-            <el-table-column label="修正" width="80">
+            <el-table-column label="状态" width="150">
+              <template #default="{ row }">
+                <el-tag v-if="isValid(row)" type="success" size="small">有效</el-tag>
+                <el-tooltip v-else content="编录数据已变化，该判定依据失效" placement="top">
+                  <el-tag type="info" size="small">已失效</el-tag>
+                </el-tooltip>
+                <el-tag v-if="row.needsReview" type="warning" size="small" style="margin-left: 4px">待复核</el-tag>
+                <el-tooltip v-if="row.recalculatedFrom" content="编录数据变更后按新数据自动重算" placement="top">
+                  <el-tag type="primary" effect="plain" size="small" style="margin-left: 4px">自动重算</el-tag>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column prop="bqValue" label="BQ" width="80" />
+            <el-table-column prop="correctedBq" label="[BQ]" width="80" />
+            <el-table-column prop="rqd" label="RQD" width="70" />
+            <el-table-column prop="kv" label="Kv" width="70" />
+            <el-table-column prop="groundwater" label="出水" width="110" />
+            <el-table-column label="修正" width="70">
               <template #default="{ row }">{{ row.manualAdjusted ? '人工' : '自动' }}</template>
+            </el-table-column>
+            <el-table-column label="判定依据（节理涌水摘要）" min-width="220" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.basisSummary || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="100" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="row.needsReview" size="small" type="warning" @click="confirmReview(row)">
+                  复核确认
+                </el-button>
+              </template>
             </el-table-column>
           </el-table>
           <el-empty v-if="history.length === 0" description="尚无历史判定" :image-size="60" />

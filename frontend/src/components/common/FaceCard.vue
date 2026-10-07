@@ -7,6 +7,8 @@ import { formatChainage } from '../../utils/geoMath';
 defineProps<{
   face: TunnelFace;
   grade?: RockGrade;
+  /** 当前判定是否待复核 */
+  needsReview?: boolean;
   jointCount?: number;
   waterCount?: number;
   footer?: string;
@@ -22,6 +24,7 @@ const emit = defineEmits<{
     <div class="row">
       <strong>{{ face.faceNo }}</strong>
       <GradeTag :grade="grade" />
+      <el-tag v-if="needsReview" size="small" type="warning">待复核</el-tag>
       <el-tag size="small" effect="plain">{{ face.excavationMethod }}</el-tag>
     </div>
     <div class="line">

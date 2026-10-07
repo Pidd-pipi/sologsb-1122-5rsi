@@ -4,9 +4,10 @@ import type { JointSet } from '../types/joint';
 import type { RockMassGrade } from '../types/grade';
 import type { WaterInflow } from '../types/water';
 import { newId } from './id';
+import { computeGradeBasis } from './gradeBasis';
 
 export const DB_NAME = 'gbtunnelface';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbtunnelface:db-version';
 
 class TunnelFaceDB extends Dexie {
@@ -50,6 +51,49 @@ class TunnelFaceDB extends Dexie {
           .toCollection()
           .modify((row: any) => {
             if (row.chainage === undefined) row.chainage = 0;
+          });
+      });
+    this.version(3)
+      .stores({
+        faces: 'id, faceNo, chainage, lithology, excavationMethod, weathering, recordedAt',
+        joints: 'id, faceId, setNo, dipDirection, dipAngle, fillMaterial',
+        grades: 'id, faceId, grade, judgedAt, bqValue',
+        waters: 'id, faceId, chainage, type, changeTrend',
+      })
+      .upgrade(async (tx) => {
+        // 掌子面补乐观并发版本号
+        await tx
+          .table('faces')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.rev === undefined) row.rev = 1;
+            if (row.updatedAt === undefined) row.updatedAt = row.recordedAt ?? Date.now();
+          });
+        // 老库判定记录没有依据摘要：按现有掌子面/节理/涌水数据补一份并标待复核
+        const faces = (await tx.table('faces').toArray()) as TunnelFace[];
+        const joints = (await tx.table('joints').toArray()) as JointSet[];
+        const waters = (await tx.table('waters').toArray()) as WaterInflow[];
+        await tx
+          .table('grades')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.needsReview === undefined) row.needsReview = false;
+            if (!row.basisHash) {
+              const face = faces.find((f) => f.id === row.faceId);
+              if (face) {
+                const basis = computeGradeBasis(
+                  face,
+                  joints.filter((j) => j.faceId === row.faceId),
+                  waters.filter((w) => w.faceId === row.faceId),
+                );
+                row.basisHash = basis.hash;
+                row.basisSummary = basis.summary;
+              } else {
+                row.basisHash = '';
+                row.basisSummary = '原始判定缺少依据摘要，且所属掌子面已删除';
+              }
+              row.needsReview = true;
+            }
           });
       });
   }
@@ -108,6 +152,8 @@ export async function ensureSeedData(): Promise<void> {
       attitude: { strike: 42, dipDirection: 132, dipAngle: 34 },
       recordedAt: now - 2 * day,
       geologist: '岑柏川',
+      rev: 1,
+      updatedAt: now - 2 * day,
     },
     {
       id: face2,
@@ -122,6 +168,8 @@ export async function ensureSeedData(): Promise<void> {
       attitude: { strike: 48, dipDirection: 138, dipAngle: 28 },
       recordedAt: now - 6 * hour,
       geologist: '岑柏川',
+      rev: 1,
+      updatedAt: now - 6 * hour,
     },
   ];
 
@@ -184,25 +232,6 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
-  const grades: RockMassGrade[] = [
-    {
-      id: newId('grade'),
-      faceId: face1,
-      grade: 'Ⅲ',
-      bqValue: 358,
-      rqd: 78,
-      jv: 6.2,
-      kv: 0.61,
-      groundwater: '点滴状出水',
-      spanWidth: 12.6,
-      correction: 0.1,
-      correctedBq: 348,
-      supportSuggestion: '系统锚杆（φ25，L=3.0 m，间距 1.0 m）+ 喷射混凝土 12 cm + 钢筋网',
-      manualAdjusted: false,
-      judgedAt: now - 2 * day,
-    },
-  ];
-
   const waters: WaterInflow[] = [
     {
       id: newId('water'),
@@ -239,6 +268,34 @@ export async function ensureSeedData(): Promise<void> {
       changeTrend: '突增',
       measuredAt: now - 4 * hour,
       chainage: 12484,
+    },
+  ];
+
+  // 示范判定记录同样带上依据指纹与摘要，与编录数据联动
+  const seedBasis = computeGradeBasis(
+    faces[0],
+    joints.filter((j) => j.faceId === face1),
+    waters.filter((w) => w.faceId === face1),
+  );
+  const grades: RockMassGrade[] = [
+    {
+      id: newId('grade'),
+      faceId: face1,
+      grade: 'Ⅲ',
+      bqValue: 358,
+      rqd: 78,
+      jv: 6.2,
+      kv: 0.61,
+      groundwater: '点滴状出水',
+      spanWidth: 12.6,
+      correction: 0.1,
+      correctedBq: 348,
+      supportSuggestion: '系统锚杆（φ25，L=3.0 m，间距 1.0 m）+ 喷射混凝土 12 cm + 钢筋网',
+      manualAdjusted: false,
+      basisHash: seedBasis.hash,
+      basisSummary: seedBasis.summary,
+      needsReview: false,
+      judgedAt: now - 2 * day,
     },
   ];
 

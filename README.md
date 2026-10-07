@@ -63,7 +63,7 @@ sologsb-1122/
         ├── components/common/{SketchCanvas,JointPolarPlot,GradeTag,FaceCard}.vue
         ├── hooks/{useFaceFilter,useGradeCalc}.ts
         ├── pages/{FaceList,FaceDetail,JointEntry,WaterView,GradeJudge}.vue
-        └── utils/{db,geoMath,id}.ts
+        └── utils/{db,geoMath,id,gradeBasis,faceDiff,crossTab}.ts
 ```
 
 ## 页面与路由
@@ -71,7 +71,7 @@ sologsb-1122/
 | 路由 | 页面 | 消费模型 |
 | --- | --- | --- |
 | `/faces` | 掌子面台账：里程区间/岩性/围岩级别/开挖方式筛选 + 级别分布条 | TunnelFace、RockMassGrade |
-| `/faces/:id` | 掌子面详情：基本信息 + 岩性素描图 + 节理组列表 + 与上循环级别比对 | TunnelFace、JointSet、RockMassGrade |
+| `/faces/:id` | 掌子面详情：基本信息（可编辑，字段级合并保存）+ 岩性素描图 + 节理组列表 + 与上循环级别比对 | TunnelFace、JointSet、RockMassGrade |
 | `/faces/:id/joints` | 节理产状录入：极点图/玫瑰图、同组产状合并、异常倾角提示 | JointSet |
 | `/faces/:id/water` | 涌水记录与沿里程趋势折线，标记突变点与建议措施 | WaterInflow |
 | `/grade/:faceId` | 围岩级别判定：逐项输入 RQD/Jv/Kv/出水状态，实时算级别与支护建议，可人工修正并保存 | RockMassGrade、TunnelFace |
@@ -80,12 +80,25 @@ sologsb-1122/
 
 ## 数据存储说明
 
-- 数据库名 `gbtunnelface`，当前结构版本 **v2**（`localStorage['gbtunnelface:db-version']` 记录）。
+- 数据库名 `gbtunnelface`，当前结构版本 **v3**（`localStorage['gbtunnelface:db-version']` 记录）。
 - 四张表：`faces`（掌子面）、`joints`（节理组）、`grades`（围岩级别判定）、`waters`（涌水记录）。
 - v1 → v2 迁移：为老掌子面补 `attitude`、`mileageRange`，为级别记录补 `correctedBq`、`manualAdjusted`，为涌水补 `chainage`，并新增索引。
+- v2 → v3 迁移：掌子面补乐观并发版本号 `rev`/`updatedAt`；老判定记录没有依据摘要的，按现有掌子面/节理/涌水数据补算 `basisHash`/`basisSummary` 并标记 `needsReview`（待复核）。
 - 岩性素描的结构面线段单独存 `localStorage['gbtunnelface:sketch:<faceId>']`，刷新后仍在。
 - 容器无状态、不挂载命名卷；清空站点数据即回到初始示范数据。
 - 首次打开灌入 2 个示范掌子面、4 组节理、1 条级别判定与 3 条涌水记录。
+
+## 级别随编录走
+
+- **判定留痕**：保存围岩级别判定时，同时记录判定依据的指纹（`basisHash`）与节理涌水摘要（`basisSummary`），指纹由掌子面关键参数 + 全部节理组 + 全部涌水记录序列化算出。
+- **失效与重算**：掌子面、节理组或涌水任一改动都会使旧判定指纹失配、立即失效；系统随即沿用旧判定的 RQD/Kv/出水状态等参数，叠加新强度、新洞跨与新节理估算 Jv 自动重算一条新判定（标记「自动重算」并记录来源）。重算完成前该掌子面在台账中不计入任何级别。
+- **待复核**：老库补录的判定、以及人工修正被数据变更冲掉后自动重算的判定，都标记「待复核」，需人工在判定页或详情页「复核确认」。
+- **台账一致性**：台账列表、级别筛选与级别分布只统计与现编录数据一致的有效判定；历史判定在判定页逐条展示「有效 / 已失效 / 待复核」与依据摘要。
+
+## 多人同时编录
+
+- 掌子面保存采用**字段级合并**：以打开表单时的快照为基准，只写入本次改过的字段；若对方已先保存同一掌子面，冲突字段不覆盖对方数据，并逐条弹窗告知「对方刚把某字段改成了什么」。
+- 每条掌子面带 `rev` 版本号，详情页可见；写库后通过 `BroadcastChannel` 通知其它标签页自动刷新，双方看到的始终是对方刚保存的数据。
 
 ## 功能要点
 
